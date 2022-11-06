@@ -6,6 +6,8 @@ import json
 from time import sleep
 from datetime import datetime
 from threading import Thread, enumerate
+from urllib import response
+from numpy import rec
 
 import requests
 
@@ -89,7 +91,7 @@ class LogzioSender:
                 last_try = True
 
             try:
-                self._flush_queue()
+                self._flush_queue_rpc()
             except Exception as e:
                 self.stdout_logger.debug(
                     'Unexpected exception while draining queue to Logz.io, '
@@ -98,6 +100,51 @@ class LogzioSender:
             if not last_try:
                 sleep(self.logs_drain_timeout)
 
+    def _flush_queue_rpc(self):
+        while not self.queue.empty():
+            logs_list = self._get_messages_up_to_max_allowed_size()
+            self.stdout_logger.debug(
+                'Starting to drain %s logs to Logz.io', len(logs_list))
+
+            # Not configurable from the outside
+            sleep_between_retries = self.retry_timeout
+            self.number_of_retries = self.number_of_retries
+
+            should_backup_to_disk = True
+            headers = {"Content-type": "application/json"}
+
+            import swing
+            for current_try in range(self.number_of_retries):
+                should_retry = False
+                try:
+                    response = swing.CreateRecords(records=logs_list)
+                    if response['error']:
+                        should_retry = True
+                    else:
+                        self.stdout_logger.debug(
+                            'Successfully sent bulk of %s logs to '
+                            'Logz.io!', len(logs_list))
+                        should_backup_to_disk = False
+                        break
+                except Exception as e:
+                    self.stdout_logger.warning(
+                        'Got exception while sending logs to Logz.io, '
+                        'Try (%s/%s). Message: %s',
+                        current_try + 1, self.number_of_retries, e)
+                    should_retry = True
+
+                if should_retry:
+                    sleep(sleep_between_retries)
+
+            if should_backup_to_disk and self.backup_logs:
+                # Write to file
+                self.stdout_logger.error(
+                    'Could not send logs to Logz.io after %s tries, '
+                    'backing up to local file system', self.number_of_retries)
+                backup_logs(logs_list, self.stdout_logger)
+
+            del logs_list
+            
     def _flush_queue(self):
         # Sending logs until queue is empty
         while not self.queue.empty():
